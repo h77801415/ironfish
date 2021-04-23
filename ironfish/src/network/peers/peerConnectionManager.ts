@@ -64,7 +64,7 @@ export class PeerConnectionManager {
     let connectAttempts = 0
 
     for (const peer of this.peerManager.peers) {
-      this.maintainOneConnectionPerPeer(peer)
+      // this.maintainOneConnectionPerPeer(peer)
 
       if (connectAttempts >= CONNECT_ATTEMPTS_MAX) continue
       if (this.connectToEligiblePeers(peer)) connectAttempts++

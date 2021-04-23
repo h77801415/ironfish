@@ -27,6 +27,11 @@ import {
   isBlockRequestPayload,
   isBlocksResponse,
   NewTransactionMessage,
+  GetBlockHashesRequest,
+  isGetBlockHashesResponse,
+  isGetBlocksResponse,
+  GetBlocksRequest,
+  isGetBlockHashesRequest,
 } from './messages'
 import { IsomorphicWebRtc, IsomorphicWebSocketConstructor } from './types'
 import {
@@ -46,12 +51,26 @@ import { Identity } from './identity'
 import { parseUrl } from './utils/parseUrl'
 import { DEFAULT_WEBSOCKET_PORT } from '../fileStores/config'
 import { IronfishNode } from '../node'
-import { NetworkBlockType } from '../blockSyncer'
+import { BlockSyncer, NetworkBlockType } from '../blockSyncer'
 import { IronfishStrategy } from '../strategy'
 import { IronfishBlockchain } from '../blockchain'
-import { SerializedWasmNoteEncrypted } from '../primitives/noteEncrypted'
+import {
+  SerializedWasmNoteEncrypted,
+  SerializedWasmNoteEncryptedHash,
+} from '../primitives/noteEncrypted'
 import { SerializedTransaction } from '../primitives/transaction'
 import { BlockHashSerdeInstance } from '../serde'
+import { VERSION_PROTOCOL } from './version'
+import { IronfishBlock, IronfishBlockSerialized } from '../primitives/block'
+import {
+  GetBlockHashesResponse,
+  GetBlocksResponse,
+  isGetBlocksRequest,
+  isNewBlockPayload,
+} from '.'
+import { Assert } from '../assert'
+import { BlockHash } from '../primitives/blockheader'
+import { Syncer } from '../syncer'
 
 /**
  * The routing style that should be used for a message of a given type
@@ -143,7 +162,15 @@ export class PeerNetwork {
     this.metrics = options.metrics || new MetricsMonitor(this.logger)
     this.bootstrapNodes = options.bootstrapNodes || []
 
-    this.localPeer = new LocalPeer(identity, options.agent, options.webSocket, options.webRtc)
+    this.localPeer = new LocalPeer(
+      identity,
+      options.agent,
+      VERSION_PROTOCOL,
+      options.chain,
+      options.webSocket,
+      options.webRtc,
+    )
+
     this.localPeer.port = options.port === undefined ? null : options.port
     this.localPeer.name = options.name || null
     this.localPeer.isWorker = options.isWorker || false
@@ -191,10 +218,32 @@ export class PeerNetwork {
     )
 
     this.registerHandler(
+      NodeMessageType.GetBlockHashes,
+      RoutingStyle.directRPC,
+      (p) => {
+        return isGetBlockHashesRequest(p) ? Promise.resolve(p) : Promise.reject()
+      },
+      (message) => this.onGetBlockHashesRequest(message),
+    )
+
+    this.registerHandler(
+      NodeMessageType.GetBlocks,
+      RoutingStyle.directRPC,
+      (p) => {
+        return isGetBlocksRequest(p) ? Promise.resolve(p) : Promise.reject()
+      },
+      (message) => this.onGetBlocksRequest(message),
+    )
+
+    this.registerHandler(
       NodeMessageType.NewBlock,
       RoutingStyle.gossip,
       (p) => {
-        return this.chain.verifier.verifyNewBlock(p, this.node.workerPool)
+        if (!isNewBlockPayload<SerializedWasmNoteEncryptedHash, SerializedTransaction>(p)) {
+          throw 'Payload is not a serialized block'
+        }
+
+        return Promise.resolve(p)
       },
       (message) => this.onNewBlock(message),
     )
@@ -209,14 +258,7 @@ export class PeerNetwork {
     )
 
     this.node.miningDirector.onNewBlock.on((block) => {
-      const serializedBlock = this.strategy.blockSerde.serialize(block)
-
-      this.gossip({
-        type: NodeMessageType.NewBlock,
-        payload: {
-          block: serializedBlock,
-        },
-      })
+      this.gossipBlock(block)
     })
 
     this.node.accounts.onBroadcastTransaction.on((transaction) => {
@@ -226,6 +268,17 @@ export class PeerNetwork {
         type: NodeMessageType.NewTransaction,
         payload: { transaction: serializedTransaction },
       })
+    })
+  }
+
+  gossipBlock(block: IronfishBlock): void {
+    const serializedBlock = this.strategy.blockSerde.serialize(block)
+
+    this.gossip({
+      type: NodeMessageType.NewBlock,
+      payload: {
+        block: serializedBlock,
+      },
     })
   }
 
@@ -258,7 +311,9 @@ export class PeerNetwork {
         )
       })
       .catch((err) => {
-        this.node.syncer.handleBlockRequestError(request, err)
+        if (this.node.syncer.handleBlockRequestError) {
+          this.node.syncer.handleBlockRequestError(request, err)
+        }
       })
   }
 
@@ -413,10 +468,12 @@ export class PeerNetwork {
         // Skip the handler if the message doesn't validate
         return
       }
+
       const newMsg = {
         ...msg,
         message: { ...msg.message, payload: resp },
       }
+
       return await handler(newMsg as IncomingPeerMessage<RouteMap<T, P>[S]>)
     }
 
@@ -503,6 +560,52 @@ export class PeerNetwork {
     return await this.globalRpcRouter.request(message, peer)
   }
 
+  async getBlockHashes(peer: Peer, start: Buffer | bigint, limit: number): Promise<Buffer[]> {
+    const origin = start instanceof Buffer ? start.toString('hex') : Number(start)
+
+    const message = {
+      type: NodeMessageType.GetBlockHashes,
+      payload: {
+        start: origin,
+        limit: limit,
+      },
+    } as GetBlockHashesRequest
+
+    const response = await this.requestFrom(peer, message)
+
+    if (!isGetBlockHashesResponse(response.message)) {
+      // TODO jspafford: disconnect peer, or handle it more properly
+      throw new Error(`Invalid GetBlockHashesResponse`)
+    }
+
+    return response.message.payload.blocks.map((hash) => Buffer.from(hash, 'hex'))
+  }
+
+  async getBlocks(
+    peer: Peer,
+    start: Buffer | bigint,
+    limit: number,
+  ): Promise<IronfishBlockSerialized[]> {
+    const origin = start instanceof Buffer ? start.toString('hex') : Number(start)
+
+    const message = {
+      type: NodeMessageType.GetBlocks,
+      payload: {
+        start: origin,
+        limit: limit,
+      },
+    } as GetBlocksRequest
+
+    const response = await this.requestFrom(peer, message)
+
+    if (!isGetBlocksResponse<BlockHash, SerializedTransaction>(response.message)) {
+      // TODO jspafford: disconnect peer, or handle it more properly
+      throw new Error(`Invalid GetBlocksResponse`)
+    }
+
+    return response.message.payload.blocks
+  }
+
   private async handleMessage(
     peer: Peer,
     incomingMessage: IncomingPeerMessage<LooseMessage>,
@@ -555,21 +658,122 @@ export class PeerNetwork {
     }
   }
 
+  private async resolveSequenceOrHash(start: string | number): Promise<Buffer | null> {
+    if (typeof start === 'string') {
+      return Buffer.from(start, 'hex')
+    }
+
+    if (typeof start === 'number') {
+      const header = await this.chain.resolveAtSequence(BigInt(start))
+      if (header) return header.hash
+    }
+
+    return null
+  }
+
+  private async onGetBlockHashesRequest(
+    request: IncomingPeerMessage<
+      Rpc<NodeMessageType.GetBlockHashes, GetBlockHashesRequest['payload']>
+    >,
+  ): Promise<GetBlockHashesResponse['payload']> {
+    if (request.message.payload.limit === 0) {
+      // TODO: increase banscore LOW
+      return { blocks: [] }
+    }
+
+    const message = request.message
+    const start = message.payload.start
+    const limit = message.payload.limit
+
+    const from = await this.resolveSequenceOrHash(start)
+    if (!from) return { blocks: [] }
+
+    const to = await this.chain.getHead(from)
+    if (!to) return { blocks: [] }
+
+    const hashes = []
+    for await (const header of this.chain.iterateToBlock(from, to)) {
+      hashes.push(header.hash)
+      if (hashes.length === limit) break
+    }
+
+    const serialized = hashes.map((h) => h.toString('hex'))
+
+    return { blocks: serialized }
+  }
+
+  private async onGetBlocksRequest(
+    request: IncomingPeerMessage<Rpc<NodeMessageType.GetBlocks, GetBlocksRequest['payload']>>,
+  ): Promise<GetBlocksResponse<BlockHash, SerializedTransaction>['payload']> {
+    if (request.message.payload.limit === 0) {
+      // TODO: increase banscore LOW
+      return { blocks: [] }
+    }
+
+    const message = request.message
+    const start = message.payload.start
+    const limit = message.payload.limit
+
+    const from = await this.resolveSequenceOrHash(start)
+    if (!from) return { blocks: [] }
+
+    const to = await this.chain.getHead(from)
+    if (!to) return { blocks: [] }
+
+    const hashes = []
+    for await (const header of this.chain.iterateToBlock(from, to)) {
+      hashes.push(header.hash)
+      if (hashes.length === limit) break
+    }
+
+    const blocks = await Promise.all(hashes.map((hash) => this.chain.getBlock(hash)))
+
+    const serialized = await Promise.all(
+      blocks.map((block) => {
+        Assert.isNotNull(block)
+        return this.strategy.blockSerde.serialize(block)
+      }),
+    )
+
+    return { blocks: serialized }
+  }
+
   private onBlockRequest(message: IncomingPeerMessage<BlockRequestMessage>) {
-    return this.node.syncer.handleBlockRequest(message)
+    if (this.node.syncer.handleBlockRequest) {
+      return this.node.syncer?.handleBlockRequest(message)
+    }
+    return Promise.resolve({ blocks: [] })
   }
 
   private onBlockResponses(
     message: IncomingPeerMessage<BlocksResponseMessage>,
     originalRequest: BlockRequest,
   ) {
-    return this.node.syncer.handleBlockResponse(message, originalRequest)
+    if (this.node.syncer.handleBlockResponse) {
+      this.node.syncer.handleBlockResponse(message, originalRequest)
+    }
   }
 
-  private onNewBlock(message: IncomingPeerMessage<NewBlockMessage>) {
+  private onNewBlock(
+    message: IncomingPeerMessage<
+      Gossip<
+        NodeMessageType.NewBlock,
+        NewBlockMessage<SerializedWasmNoteEncryptedHash, SerializedTransaction>['payload']
+      >
+    >,
+  ) {
     const block = message.message.payload.block
-    const peer = message.peerIdentity
-    return this.node.syncer.addBlockToProcess(block, peer, NetworkBlockType.GOSSIP)
+    const identity = message.peerIdentity
+    const peer = this.peerManager.getPeerOrThrow(message.peerIdentity)
+
+    if (this.node.syncer instanceof Syncer) {
+      void this.node.syncer.addNewBlock(peer, block)
+    }
+
+    if (this.node.syncer instanceof BlockSyncer) {
+      const deserialized = this.strategy.blockSerde.deserialize(block)
+      this.node.syncer.addBlockToProcess(deserialized, identity, NetworkBlockType.GOSSIP)
+    }
   }
 
   private async onNewTransaction(

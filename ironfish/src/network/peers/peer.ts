@@ -5,7 +5,6 @@ import { Event } from '../../event'
 import { Logger, createRootLogger } from '../../logger'
 
 import { Identity } from '../identity'
-import { Version } from '../version'
 import { DisconnectingReason, LooseMessage } from '../messages'
 import { ConnectionRetry } from './connectionRetry'
 import { WebRtcConnection, WebSocketConnection } from './connections'
@@ -21,7 +20,7 @@ type PeerConnectionState =
   | { webSocket?: undefined; webRtc: WebRtcConnection }
   | { webSocket: WebSocketConnection; webRtc?: undefined }
 
-type PeerState =
+export type PeerState =
   /* Identity may exist if the peer is known by another peer, or has been previously connected to */
   | { type: 'DISCONNECTED'; identity: Identity | null }
   /* Peer has at least one connection, but none are ready to send/receive messages */
@@ -65,12 +64,26 @@ export class Peer {
    * name associated with this peer
    */
   name: string | null = null
-
   /**
-   * Is the peer a worker node that should not be advertised
+   * The peers protocol version
    */
-  version: Version | null = null
-
+  version: number | null = null
+  /**
+   * The peers agent
+   */
+  agent: string | null = null
+  /**
+   * The peers heaviest head hash
+   */
+  head: Buffer | null = null
+  /**
+   * The peers heaviest head cumulative work
+   */
+  work: bigint | null = null
+  /**
+   * The peers heaviest head sequence
+   */
+  sequence: bigint | null = null
   /**
    * The loggable name of the peer. For a more specific value,
    * try Peer.name or Peer.state.identity.
@@ -167,7 +180,9 @@ export class Peer {
    * Event fired when the peer changes state. The event may fire when connections change, even if the
    * state type stays the same.
    */
-  readonly onStateChanged: Event<[{ prevState: PeerState }]> = new Event()
+  readonly onStateChanged: Event<
+    [{ peer: Peer; state: PeerState; prevState: PeerState }]
+  > = new Event()
 
   constructor(
     identity: Identity | null,
@@ -541,7 +556,7 @@ export class Peer {
       )
     }
 
-    this.onStateChanged.emit({ prevState })
+    this.onStateChanged.emit({ peer: this, state: nextState, prevState })
   }
 
   /**

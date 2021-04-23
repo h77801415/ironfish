@@ -33,6 +33,7 @@ import {
   SerializedWasmNoteEncryptedHash,
   WasmNoteEncryptedHash,
 } from './primitives/noteEncrypted'
+import { Syncer } from './syncer'
 
 export const MAX_MESSAGE_SIZE = 500000 // 0.5 MB
 export const MAX_BLOCKS_PER_MESSAGE = 1
@@ -45,14 +46,6 @@ export const ALLOWED_TRANSITIONS_TO_FROM = {
   ['STOPPING']: ['IDLE', 'SYNCING', 'REQUESTING'],
   ['STOPPED']: ['STOPPING'],
   ['REQUESTING']: ['SYNCING', 'IDLE'],
-}
-
-/**
- * Responsible for the metrics used in the status command.
- */
-export type BlockSyncerChainStatus = {
-  blockAddingSpeed: Meter
-  speed: Meter
 }
 
 export type Request = {
@@ -175,7 +168,7 @@ export class BlockSyncer<
     type: 'STOPPED',
   }
 
-  public status: BlockSyncerChainStatus
+  speed: Meter
 
   private blockSyncPromise: Promise<void>
   public blockRequestPromise: Promise<void>
@@ -225,10 +218,7 @@ export class BlockSyncer<
     this.gossippedBlocksForProcessing = []
     this.requestedBlocksForProcessing = []
 
-    this.status = {
-      blockAddingSpeed: this.metrics.addMeter(),
-      speed: this.metrics.addMeter(),
-    }
+    this.speed = this.metrics.addMeter()
   }
 
   get state(): Readonly<ActionState<E, H, T, SE, SH, ST>> {
@@ -332,7 +322,7 @@ export class BlockSyncer<
    *
    * Does not resolve until all outstanding promises have terminated.
    */
-  async shutdown(): Promise<void> {
+  async stop(): Promise<void> {
     if (this.state.type === 'STOPPED' || this.state.type === 'STOPPING') return
 
     this.dispatch('STOPPING')
@@ -472,8 +462,7 @@ export class BlockSyncer<
       )
 
       // Metrics status update
-      this.status.speed.add(1)
-      this.status.blockAddingSpeed.add(timeToAddBlock)
+      this.speed.add(1)
 
       if (!addBlockResult.isAdded || !addBlockResult.resolvedGraph) {
         this.logger.debug(
@@ -686,11 +675,13 @@ export class BlockSyncer<
   }
 }
 
-export type IronfishBlockSyncer = BlockSyncer<
-  IronfishNoteEncrypted,
-  WasmNoteEncryptedHash,
-  IronfishTransaction,
-  SerializedWasmNoteEncrypted,
-  SerializedWasmNoteEncryptedHash,
-  SerializedTransaction
->
+export type IronfishBlockSyncer =
+  | BlockSyncer<
+      IronfishNoteEncrypted,
+      WasmNoteEncryptedHash,
+      IronfishTransaction,
+      SerializedWasmNoteEncrypted,
+      SerializedWasmNoteEncryptedHash,
+      SerializedTransaction
+    >
+  | Syncer

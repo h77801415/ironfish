@@ -157,7 +157,7 @@ describe('BlockSyncer', () => {
       await syncer.blockRequestPromise
 
       expect(spyQueue).toHaveBeenCalledWith(block, 'somebody', NetworkBlockType.SYNCING)
-      await syncer.shutdown()
+      await syncer.stop()
     })
 
     it('fails if the block cannot be deserialized', async () => {
@@ -189,7 +189,7 @@ describe('BlockSyncer', () => {
       await syncer.blockRequestPromise
 
       expect(spyQueue).toHaveBeenCalledTimes(0)
-      await syncer.shutdown()
+      await syncer.stop()
     })
   })
 
@@ -278,7 +278,7 @@ describe('BlockSyncer', () => {
     })
 
     afterEach(async () => {
-      await syncer.shutdown()
+      await syncer.stop()
       targetSpy.mockClear()
     })
 
@@ -286,7 +286,7 @@ describe('BlockSyncer', () => {
       await createChain('SYNCED')
 
       await syncer.start()
-      await syncer.shutdown()
+      await syncer.stop()
 
       expect(requestBlockSpy).toBeCalledTimes(1)
     })
